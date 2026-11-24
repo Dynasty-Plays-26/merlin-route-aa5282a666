@@ -8,4 +8,4 @@ Offline-first iPad PWA for a delivery route (Merlin-branded). Static files only 
 
 Webhook payload: `{ type, date, route, driver, totals, stops[], exceptions[] }`. Optional Bearer token header.
 
-Rosters are never committed. A roster loads from a private link (`#load=` fragment, base64url JSON), which stays on the device and is never sent to the server.
+The default Tower 01 roster ships in roster.js (approved by Don). Other rosters can load from a private `#load=` link.

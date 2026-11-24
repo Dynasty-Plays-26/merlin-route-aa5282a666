@@ -784,6 +784,16 @@
     navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW', err));
   }
 
+  const sampleNames = ['Garcia Family', 'Corner Café'];
+  const onlySample = db.stops.length && db.stops.some(x => sampleNames.includes(x.name)) && !db.stops.some(x => /^t01-/.test(x.id));
+  if (window.MERLIN_DEFAULT_ROSTER && (!db.stops.length || onlySample)) {
+    const d = window.MERLIN_DEFAULT_ROSTER;
+    db.stops = d.stops.map(x => ({ ...x }));
+    db.settings.routeName = d.routeName;
+    if (!db.settings.driver) db.settings.driver = d.driver || '';
+    if (db.days[localDate()]) snapshotIfNeeded();
+    save();
+  }
   if (/[#&]load=/.test(location.hash)) {
     importRoster(location.hash);
     tab = 'route';
