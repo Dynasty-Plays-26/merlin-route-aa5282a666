@@ -3,7 +3,7 @@
   'use strict';
 
   const KEY = 'milkroute.v1';
-  const APP_VERSION = '1.1.0';
+  const APP_VERSION = '1.3.0';
 
   // ---------- Storage ----------
   const blank = () => ({
@@ -50,7 +50,7 @@
   }
   function rec(stopId, ds = localDate()) {
     const d = day(ds);
-    if (!d.stops[stopId]) d.stops[stopId] = { status: 'pending', at: null, returns: 0, absent: null, spills: [], notes: [], handoff: null };
+    if (!d.stops[stopId]) d.stops[stopId] = { status: 'pending', at: null, absent: null, spills: [], notes: [], handoff: null, interest: null, blocked: null };
     return d.stops[stopId];
   }
   // Stops for a given day: today uses the live list; past days use the snapshot saved when work started.
@@ -63,7 +63,7 @@
     const d = day(ds);
     d.snapshot = db.stops.map(s => ({ ...s }));
   }
-  const hasException = r => !!(r && (r.absent || (r.spills || []).length || (r.notes || []).length));
+  const hasException = r => !!(r && (r.absent || r.blocked || (r.notes || []).length));
   const isDone = r => r && (r.status === 'delivered' || r.status === 'skipped');
 
   // ---------- Icons ----------
@@ -94,12 +94,13 @@
     q.textContent = `${db.outbox.length} queued`;
   }
 
+  const ABSENT_LABEL = { desk: 'left at desk', left: 'left at desk', coworker: 'left with coworker', later: 'come back later', back: 'took it back' };
   // ---------- Route view ----------
   function stopCard(s, i, r, nextId) {
     const tags = [];
-    if (r.returns) tags.push(`<span class="tag blue">${r.returns} bottle${r.returns === 1 ? '' : 's'} back</span>`);
-    if (r.absent) tags.push(`<span class="tag amber">Absent · ${r.absent.outcome === 'left' ? 'left at door' : 'brought back'}</span>`);
-    r.spills.forEach(sp => tags.push(`<span class="tag red">Spill · ${sp.crates} crate${sp.crates === 1 ? '' : 's'}${sp.bottles ? `, ${sp.bottles} btl lost` : ''}</span>`));
+    if (r.interest) tags.push(`<span class="tag blue">Interested${r.interest.items.length ? ' · ' + esc(r.interest.items.join(', ')) : ''}${r.interest.headcount ? ' · ' + r.interest.headcount + ' ppl' : ''}${r.interest.eventDate ? ' · ' + esc(r.interest.eventDate) : ''}</span>`);
+    if (r.absent) tags.push(`<span class="tag amber">Not in · ${ABSENT_LABEL[r.absent.outcome] || 'left at desk'}</span>`);
+    if (r.blocked) tags.push(`<span class="tag red">Couldn't drop · ${esc(r.blocked.reason)}${r.blocked.retry && !isDone(r) ? ' · try later' : ''}</span>`);
     if (r.handoff) tags.push(`<span class="tag green">Took it: ${esc(r.handoff.acceptedBy || '—')}${r.handoff.next ? ' · ' + esc(r.handoff.next) : ''}</span>`);
     if (r.notes.length) tags.push(`<span class="tag amber">${r.notes.length} note${r.notes.length === 1 ? '' : 's'}</span>`);
     const tagHtml = tags.length ? `<div class="tags">${tags.join('')}</div>` : '';
@@ -111,7 +112,7 @@
           <div class="check ${exc ? 'amber' : ''}">${r.status === 'skipped' ? ic.alert : ic.check}</div>
           <div class="grow">
             <div class="card-title">${i + 1}. ${esc(s.name)}</div>
-            <div class="card-addr">${r.status === 'skipped' ? 'Not delivered' : 'Delivered'} ${timeStr(r.at)}</div>
+            <div class="card-addr">${r.status === 'skipped' ? "Couldn't drop" : r.absent ? 'Left ' + (r.absent.outcome === 'coworker' ? 'with coworker' : 'at desk') : 'Delivered'} ${timeStr(r.at)}</div>
             ${tagHtml}
           </div>
           <button class="btn-ghost" data-act="exception" data-id="${s.id}">Log</button>
@@ -135,9 +136,9 @@
       ${s.brief ? `<details class="brief"><summary>411</summary><p>${esc(s.brief)}</p></details>` : ''}
       <button class="btn-deliver" data-act="deliver" data-id="${s.id}">${ic.check}Delivered</button>
       <div class="actions">
-        <button class="act blue" data-act="returns" data-id="${s.id}">Bottles back</button>
-        <button class="act amber" data-act="absent" data-id="${s.id}">Not home</button>
-        <button class="act red" data-act="spill" data-id="${s.id}">Spilled crate</button>
+        <button class="act blue" data-act="interest" data-id="${s.id}">Interested</button>
+        <button class="act amber" data-act="absent" data-id="${s.id}">Not in</button>
+        <button class="act red" data-act="blocked" data-id="${s.id}">Couldn't drop</button>
         <button class="act teal" data-act="handoff" data-id="${s.id}">Who took it</button>
       </div>
     </article>`;
@@ -154,7 +155,7 @@
         </div></div>`;
     }
     const d = db.days[today];
-    const recs = list.map(s => (d && d.stops[s.id]) || { status: 'pending', returns: 0, absent: null, spills: [], notes: [] });
+    const recs = list.map(s => ({ status: 'pending', absent: null, spills: [], notes: [], ...((d && d.stops[s.id]) || {}) }));
     const next = list.find((s, i) => !isDone(recs[i]));
     const shown = list.map((s, i) => ({ s, i, r: recs[i] })).filter(x => routeFilter === 'all' || !isDone(x.r));
     const left = list.length - recs.filter(isDone).length;
@@ -174,26 +175,26 @@
     const list = stopsFor(ds);
     const d = db.days[ds] || { stops: {} };
     const rows = list.map((s, i) => {
-      const r = { status: 'pending', at: null, returns: 0, absent: null, spills: [], notes: [], handoff: null, ...(d.stops[s.id] || {}) };
-      const crates = r.spills.reduce((a, b) => a + (b.crates || 0), 0);
-      const lost = r.spills.reduce((a, b) => a + (b.bottles || 0), 0);
+      const r = { status: 'pending', at: null, absent: null, spills: [], notes: [], handoff: null, interest: null, blocked: null, ...(d.stops[s.id] || {}) };
       let status = r.status;
       if (r.status === 'skipped') status = 'not_delivered';
+      const it = r.interest || null;
       return {
         seq: i + 1, stop_id: s.id, stop: s.name, address: s.address || '', contact: s.contact || '', segment: s.segment || '', order: s.order || '',
         accepted_by: r.handoff ? r.handoff.acceptedBy || '' : '', next_action: r.handoff ? r.handoff.next || '' : '',
-        status, completed_at: r.at || '', bottles_returned: r.returns || 0,
-        customer_absent: r.absent ? 'yes' : 'no', absent_outcome: r.absent ? (r.absent.outcome === 'left' ? 'left_at_door' : 'brought_back') : '',
-        spilled_crates: crates, bottles_lost: lost,
-        notes: [...(r.handoff && r.handoff.note ? [r.handoff.note] : []), ...(r.spills.map(x => x.note).filter(Boolean)), ...(r.absent && r.absent.note ? [r.absent.note] : []), ...r.notes.map(n => n.text)].join(' | ')
+        status, completed_at: r.at || '',
+        not_in: r.absent ? 'yes' : 'no', not_in_outcome: r.absent ? (ABSENT_LABEL[r.absent.outcome] || '') : '',
+        interested: it ? 'yes' : 'no', interest: it ? it.items.join('; ') : '', event_date: it ? it.eventDate || '' : '', headcount: it && it.headcount ? it.headcount : '',
+        couldnt_drop: r.blocked ? r.blocked.reason : '',
+        notes: [...(r.handoff && r.handoff.note ? [r.handoff.note] : []), ...(it && it.note ? [it.note] : []), ...(r.blocked && r.blocked.note ? [r.blocked.note] : []), ...(r.absent && r.absent.note ? [r.absent.note] : []), ...r.notes.map(n => n.text)].join(' | ')
       };
     });
     const events = [];
     list.forEach(s => {
       const r = d.stops[s.id]; if (!r) return;
-      if (r.absent) events.push({ at: r.absent.at, stop: s.name, type: 'customer_absent', qty: '', detail: (r.absent.outcome === 'left' ? 'Left at door' : 'Brought back') + (r.absent.note ? ' — ' + r.absent.note : '') });
-      (r.spills || []).forEach(sp => events.push({ at: sp.at, stop: s.name, type: 'spilled_crate', qty: sp.crates, detail: `${sp.bottles || 0} bottles lost${sp.note ? ' — ' + sp.note : ''}` }));
-      if (r.returns) events.push({ at: r.returnsAt || r.at || '', stop: s.name, type: 'bottle_return', qty: r.returns, detail: '' });
+      if (r.absent) events.push({ at: r.absent.at, stop: s.name, type: 'not_in', qty: '', detail: (ABSENT_LABEL[r.absent.outcome] || '') + (r.absent.note ? ' — ' + r.absent.note : '') });
+      if (r.interest) events.push({ at: r.interest.at, stop: s.name, type: 'interested', qty: r.interest.headcount || '', detail: [r.interest.items.join(', '), r.interest.eventDate && 'Event ' + r.interest.eventDate, r.interest.note].filter(Boolean).join(' — ') });
+      if (r.blocked) events.push({ at: r.blocked.at, stop: s.name, type: 'couldnt_drop', qty: '', detail: r.blocked.reason + (r.blocked.retry ? ' (try later)' : ' (skipped)') + (r.blocked.note ? ' — ' + r.blocked.note : '') });
       (r.notes || []).forEach(n => events.push({ at: n.at, stop: s.name, type: 'note', qty: '', detail: n.text }));
       if (r.handoff) events.push({ at: r.handoff.at, stop: s.name, type: 'handoff', qty: '', detail: [r.handoff.acceptedBy && 'Took it: ' + r.handoff.acceptedBy, r.handoff.next && 'Next: ' + r.handoff.next, r.handoff.note].filter(Boolean).join(' — ') });
     });
@@ -203,11 +204,11 @@
       delivered: rows.filter(r => r.status === 'delivered').length,
       not_delivered: rows.filter(r => r.status === 'not_delivered').length,
       pending: rows.filter(r => r.status === 'pending').length,
-      customer_absent: rows.filter(r => r.customer_absent === 'yes').length,
+      not_in: rows.filter(r => r.not_in === 'yes').length,
       handoffs_named: rows.filter(r => r.accepted_by).length,
-      bottles_returned: rows.reduce((a, r) => a + r.bottles_returned, 0),
-      spilled_crates: rows.reduce((a, r) => a + r.spilled_crates, 0),
-      bottles_lost: rows.reduce((a, r) => a + r.bottles_lost, 0)
+      interested: rows.filter(r => r.interested === 'yes').length,
+      couldnt_drop: rows.filter(r => r.couldnt_drop).length,
+      interested_headcount: rows.reduce((a, r) => a + (Number(r.headcount) || 0), 0)
     };
     const done = rows.filter(r => r.completed_at).map(r => r.completed_at).sort();
     totals.first_stop_at = done[0] || '';
@@ -227,9 +228,9 @@
       </div>
       <div class="kpis">
         <div class="kpi green"><div class="v">${t.delivered}</div><div class="l">Delivered of ${t.stops}</div></div>
-        <div class="kpi amber"><div class="v">${t.customer_absent}</div><div class="l">Customer absent</div></div>
-        <div class="kpi blue"><div class="v">${t.bottles_returned}</div><div class="l">Bottles returned</div></div>
-        <div class="kpi red"><div class="v">${t.spilled_crates}</div><div class="l">Spilled crates${t.bottles_lost ? ` · ${t.bottles_lost} btl lost` : ''}</div></div>
+        <div class="kpi blue"><div class="v">${t.interested}</div><div class="l">Interested${t.interested_headcount ? ` · ${t.interested_headcount} ppl` : ''}</div></div>
+        <div class="kpi amber"><div class="v">${t.not_in}</div><div class="l">Contact not in</div></div>
+        <div class="kpi red"><div class="v">${t.couldnt_drop}</div><div class="l">Couldn't drop</div></div>
       </div>
       <div class="panel">
         <h3>Send the day</h3>
@@ -246,16 +247,16 @@
       <div class="panel">
         <h3>Stops</h3>
         ${rows.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>#</th><th>Stop</th><th>Status</th><th>Time</th><th class="num">Back</th><th class="num">Spill</th><th>Notes</th></tr></thead>
+          <thead><tr><th>#</th><th>Stop</th><th>Status</th><th>Time</th><th>Interest</th><th>Notes</th></tr></thead>
           <tbody>${rows.map(r => `<tr>
             <td>${r.seq}</td><td><strong>${esc(r.stop)}</strong><div class="muted">${esc([r.address, r.accepted_by && 'Took it: ' + r.accepted_by].filter(Boolean).join(' · '))}</div></td>
-            <td class="st ${r.customer_absent === 'yes' ? 'absent' : r.status === 'not_delivered' ? 'skipped' : r.status}">${r.status === 'not_delivered' ? 'Not delivered' : r.status === 'delivered' ? (r.customer_absent === 'yes' ? 'Left at door' : 'Delivered') : 'Pending'}</td>
-            <td>${timeStr(r.completed_at)}</td><td class="num">${r.bottles_returned || ''}</td><td class="num">${r.spilled_crates || ''}</td><td>${esc(r.notes)}</td>
+            <td class="st ${r.not_in === 'yes' ? 'absent' : r.status === 'not_delivered' ? 'skipped' : r.status}">${r.status === 'not_delivered' ? "Couldn't drop" : r.status === 'delivered' ? (r.not_in === 'yes' ? (r.not_in_outcome === 'left with coworker' ? 'With coworker' : 'Left at desk') : 'Delivered') : (r.couldnt_drop || r.not_in === 'yes' ? 'Try later' : 'Pending')}</td>
+            <td>${timeStr(r.completed_at)}</td><td>${esc([r.interest, r.headcount && r.headcount + ' ppl', r.event_date].filter(Boolean).join(' · '))}</td><td>${esc(r.notes)}</td>
           </tr>`).join('')}</tbody></table></div>` : '<p class="muted">No stops for this day.</p>'}
       </div>
       <div class="panel">
         <h3>Exception log</h3>
-        ${events.length ? `<ul class="log">${events.map(e => `<li><strong>${timeStr(e.at)}</strong> · ${esc(e.stop)} · ${esc(e.type.replace('_', ' '))}${e.qty !== '' ? ` × ${e.qty}` : ''}${e.detail ? ` — ${esc(e.detail)}` : ''}</li>`).join('')}</ul>` : '<p class="muted">Clean day so far. No exceptions logged.</p>'}
+        ${events.length ? `<ul class="log">${events.map(e => `<li><strong>${timeStr(e.at)}</strong> · ${esc(e.stop)} · ${esc(({not_in:'Not in',interested:'Interested',couldnt_drop:"Couldn't drop",handoff:'Who took it',note:'Note'})[e.type] || e.type)}${e.qty !== '' ? ` · ${e.qty} ppl` : ''}${e.detail ? ` — ${esc(e.detail)}` : ''}</li>`).join('')}</ul>` : '<p class="muted">Clean day so far. No exceptions logged.</p>'}
       </div>
       ${days.length > 1 ? `<div class="panel"><h3>Past days on this iPad</h3><div class="row">${days.slice(0, 14).map(k => `<button class="btn secondary" data-day="${k}">${prettyDate(k)}</button>`).join('')}</div></div>` : ''}`;
   }
@@ -381,78 +382,101 @@
     maybeAutoPush();
   }
 
-  function sheetReturns(id) {
-    const s = stopById(id); const r = rec(id);
-    openSheet(`<h2>Bottles back</h2><p class="sub">${esc(s.name)}</p>
-      ${stepper('Empty bottles collected', 'retN', r.returns || 0)}
-      <div class="quick">${[1, 2, 3, 4, 6, 8, 12].map(n => `<button type="button" data-set="${n}" data-for="retN">${n}</button>`).join('')}</div>
-      <div class="row"><button class="btn" id="ok">Save count</button><button class="btn secondary" id="okDeliver">Save + Delivered</button></div>
+  const INTEREST = ['Executive box lunch', 'Catering', 'Charcuterie board', 'Tasting', 'Send menu'];
+  const BLOCKED = ['No access past lobby', 'No-gift policy', 'Office closed / nobody there', 'Wrong suite / moved'];
+
+  function sheetInterest(id) {
+    const s = stopById(id); const r = rec(id); const cur = r.interest || {};
+    let picks = new Set(cur.items || []);
+    openSheet(`<h2>Interested</h2><p class="sub">${esc(s.name)}</p>
+      <p class="stepper-label">What are they interested in?</p>
+      <div class="choice" role="group">${INTEREST.map(n => `<button type="button" data-i="${esc(n)}" aria-pressed="${picks.has(n)}">${esc(n)}</button>`).join('')}</div>
+      <label class="field"><span>Event date (if they mentioned one)</span><input type="date" id="iDate" value="${esc(cur.eventDate || '')}"></label>
+      ${stepper('Headcount', 'iHead', cur.headcount || 0)}
+      <div class="quick">${[10, 15, 20, 25, 30, 50].map(n => `<button type="button" data-set="${n}" data-for="iHead">${n}</button>`).join('')}</div>
+      <label class="field"><span>Note (optional)</span><input type="text" id="iNote" value="${esc(cur.note || '')}" placeholder="Board meeting, holiday party, quarterly lunch…"></label>
+      <div class="row"><button class="btn" id="okDeliver">Save + Delivered</button><button class="btn secondary" id="ok">Save only</button></div>
       <button class="btn secondary wide" id="cancel" style="margin-top:10px">Cancel</button>`, sh => {
       wireSteppers(sh);
-      const apply = () => { touchDay(); const rr = rec(id); rr.returns = parseInt(sh.querySelector('#retN').textContent, 10) || 0; rr.returnsAt = new Date().toISOString(); save(); };
-      sh.querySelector('#ok').onclick = () => { apply(); closeSheet(); render(); toast(`${rec(id).returns} bottles logged`); };
-      sh.querySelector('#okDeliver').onclick = () => { apply(); closeSheet(); deliver(id); };
+      sh.querySelectorAll('[data-i]').forEach(b => b.onclick = () => { const v = b.dataset.i; picks.has(v) ? picks.delete(v) : picks.add(v); b.setAttribute('aria-pressed', picks.has(v)); });
+      const apply = () => {
+        touchDay();
+        const head = parseInt(sh.querySelector('#iHead').textContent, 10) || 0;
+        const it = { items: INTEREST.filter(n => picks.has(n)), eventDate: sh.querySelector('#iDate').value, headcount: head, note: sh.querySelector('#iNote').value.trim(), at: new Date().toISOString() };
+        rec(id).interest = (it.items.length || it.eventDate || it.headcount || it.note) ? it : null;
+        save();
+      };
+      sh.querySelector('#ok').onclick = () => { apply(); closeSheet(); render(); toast('Interest saved'); };
+      sh.querySelector('#okDeliver').onclick = () => { apply(); closeSheet(); if (isDone(rec(id))) { render(); toast('Interest saved'); } else deliver(id); };
       sh.querySelector('#cancel').onclick = closeSheet;
     });
   }
 
   function sheetAbsent(id) {
     const s = stopById(id);
-    let outcome = 'left';
-    openSheet(`<h2>Customer not home</h2><p class="sub">${esc(s.name)}</p>
+    let outcome = 'desk';
+    openSheet(`<h2>Contact not in</h2><p class="sub">${esc(s.name)}${s.contact ? ' · ' + esc(s.contact) : ''}</p>
       <div class="choice" role="group">
-        <button type="button" data-o="left" aria-pressed="true">Left order at the door / cooler</button>
-        <button type="button" data-o="back" aria-pressed="false">Brought the order back</button>
+        <button type="button" data-o="desk" aria-pressed="true">Left it at the front desk</button>
+        <button type="button" data-o="coworker" aria-pressed="false">Left it with a coworker</button>
+        <button type="button" data-o="later" aria-pressed="false">Kept the loaf — come back later</button>
       </div>
-      <label class="field"><span>Note (optional)</span><input type="text" id="absNote" placeholder="Gate locked, dog out, no cooler…"></label>
-      <button class="btn wide" id="ok">Log and complete stop</button>
+      <label class="field"><span>Who has it / note (optional)</span><input type="text" id="absNote" placeholder="Receptionist name, back at 2, in a meeting…"></label>
+      <button class="btn wide" id="ok">Save</button>
       <button class="btn secondary wide" id="cancel" style="margin-top:10px">Cancel</button>`, sh => {
       sh.querySelectorAll('[data-o]').forEach(b => b.onclick = () => { outcome = b.dataset.o; sh.querySelectorAll('[data-o]').forEach(x => x.setAttribute('aria-pressed', x === b)); });
       sh.querySelector('#ok').onclick = () => {
         touchDay();
         const r = rec(id); const prev = JSON.stringify(r);
         r.absent = { outcome, note: sh.querySelector('#absNote').value.trim(), at: new Date().toISOString() };
-        r.status = outcome === 'left' ? 'delivered' : 'skipped'; r.at = r.absent.at;
+        if (outcome === 'later') { r.status = 'pending'; r.at = null; } else { r.status = 'delivered'; r.at = r.absent.at; }
         save(); closeSheet(); render();
-        toast(`${s.name}: absent logged`, () => { day().stops[id] = JSON.parse(prev); save(); render(); });
+        toast(outcome === 'later' ? `${s.name}: come back later` : `${s.name}: ${outcome === 'desk' ? 'left at desk' : 'left with coworker'}`, () => { day().stops[id] = JSON.parse(prev); save(); render(); });
         maybeAutoPush();
       };
       sh.querySelector('#cancel').onclick = closeSheet;
     });
   }
 
-  function sheetSpill(id) {
+  function sheetBlocked(id) {
     const s = stopById(id);
-    openSheet(`<h2>Spilled crate</h2><p class="sub">Logged against ${esc(s.name)}</p>
-      ${stepper('Crates spilled', 'spC', 1)}
-      ${stepper('Bottles lost or broken', 'spB', 0)}
-      <label class="field"><span>Note (optional)</span><input type="text" id="spNote" placeholder="Dropped at curb, glass cleaned up…"></label>
-      <button class="btn wide" id="ok">Log spill</button>
+    let reason = BLOCKED[0]; let retry = true;
+    openSheet(`<h2>Couldn't drop</h2><p class="sub">${esc(s.name)}</p>
+      <div class="choice" role="group">${BLOCKED.map((n, i) => `<button type="button" data-r="${esc(n)}" aria-pressed="${i === 0}">${esc(n)}</button>`).join('')}</div>
+      <p class="stepper-label">Then what?</p>
+      <div class="choice" role="group">
+        <button type="button" data-t="1" aria-pressed="true">Try again later today</button>
+        <button type="button" data-t="0" aria-pressed="false">Skip this stop</button>
+      </div>
+      <label class="field"><span>Note (optional)</span><input type="text" id="bNote" placeholder="Badge-only floor, call ahead, new tenant…"></label>
+      <button class="btn wide" id="ok">Save</button>
       <button class="btn secondary wide" id="cancel" style="margin-top:10px">Cancel</button>`, sh => {
-      wireSteppers(sh);
+      sh.querySelectorAll('[data-r]').forEach(b => b.onclick = () => { reason = b.dataset.r; sh.querySelectorAll('[data-r]').forEach(x => x.setAttribute('aria-pressed', x === b)); });
+      sh.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { retry = b.dataset.t === '1'; sh.querySelectorAll('[data-t]').forEach(x => x.setAttribute('aria-pressed', x === b)); });
       sh.querySelector('#ok').onclick = () => {
-        const crates = parseInt(sh.querySelector('#spC').textContent, 10) || 0;
-        const bottles = parseInt(sh.querySelector('#spB').textContent, 10) || 0;
-        if (!crates && !bottles) { toast('Add at least one crate or bottle'); return; }
         touchDay();
-        rec(id).spills.push({ crates, bottles, note: sh.querySelector('#spNote').value.trim(), at: new Date().toISOString() });
-        save(); closeSheet(); render(); toast('Spill logged');
+        const r = rec(id); const prev = JSON.stringify(r);
+        r.blocked = { reason, retry, note: sh.querySelector('#bNote').value.trim(), at: new Date().toISOString() };
+        if (retry) { r.status = 'pending'; r.at = null; } else { r.status = 'skipped'; r.at = r.blocked.at; }
+        save(); closeSheet(); render();
+        toast(retry ? `${s.name}: try again later` : `${s.name}: skipped`, () => { day().stops[id] = JSON.parse(prev); save(); render(); });
+        maybeAutoPush();
       };
       sh.querySelector('#cancel').onclick = closeSheet;
     });
   }
 
   function sheetLog(id) {
-    const s = stopById(id); const r = rec(id);
-    openSheet(`<h2>${esc(s.name)}</h2><p class="sub">Add to this stop's log</p>
+    const s = stopById(id);
+    openSheet(`<h2>${esc(s.name)}</h2><p class="sub">Add to this stop</p>
       <div class="choice">
-        <button type="button" id="lRet">Bottles back (${r.returns || 0})</button>
-        <button type="button" id="lSpill">Spilled crate</button>
+        <button type="button" id="lInt">Interested</button>
+        <button type="button" id="lWho">Who took it</button>
         <button type="button" id="lNote">Add a note</button>
       </div>
       <button class="btn secondary wide" id="cancel">Close</button>`, sh => {
-      sh.querySelector('#lRet').onclick = () => sheetReturns(id);
-      sh.querySelector('#lSpill').onclick = () => sheetSpill(id);
+      sh.querySelector('#lInt').onclick = () => sheetInterest(id);
+      sh.querySelector('#lWho').onclick = () => sheetHandoff(id);
       sh.querySelector('#lNote').onclick = () => sheetNote(id);
       sh.querySelector('#cancel').onclick = closeSheet;
     });
@@ -521,6 +545,7 @@
     const prev = JSON.stringify(r);
     r.status = 'pending'; r.at = null;
     if (r.absent) r.absent = null;
+    if (r.blocked) r.blocked = null;
     save(); render();
     toast('Stop reopened', () => { day().stops[id] = JSON.parse(prev); save(); render(); });
   }
@@ -630,9 +655,9 @@
       const data = events.map(e => ({ ...meta, time: e.at ? new Date(e.at).toLocaleTimeString() : '', stop: e.stop, type: e.type, qty: e.qty, detail: e.detail }));
       deliverFile(`${slug(meta.route)}-${viewDate}-exceptions.csv`, toCSV(data, cols), 'text/csv');
     } else {
-      const cols = ['date', 'route', 'driver', 'seq', 'stop', 'address', 'contact', 'segment', 'order', 'status', 'completed_at', 'accepted_by', 'next_action', 'bottles_returned', 'customer_absent', 'absent_outcome', 'spilled_crates', 'bottles_lost', 'notes'];
+      const cols = ['date', 'route', 'driver', 'seq', 'stop', 'address', 'contact', 'segment', 'order', 'status', 'completed_at', 'accepted_by', 'next_action', 'not_in', 'not_in_outcome', 'interested', 'interest', 'event_date', 'headcount', 'couldnt_drop', 'notes'];
       const data = rows.map(r => ({ ...meta, ...r, completed_at: r.completed_at ? new Date(r.completed_at).toLocaleString() : '' }));
-      data.push({ date: viewDate, route: meta.route, driver: meta.driver, seq: '', stop: 'TOTAL', address: '', contact: '', segment: '', order: '', accepted_by: totals.handoffs_named ? `${totals.handoffs_named} named` : '', next_action: '', status: `${totals.delivered} delivered / ${totals.stops}`, completed_at: '', bottles_returned: totals.bottles_returned, customer_absent: totals.customer_absent, absent_outcome: '', spilled_crates: totals.spilled_crates, bottles_lost: totals.bottles_lost, notes: '' });
+      data.push({ date: viewDate, route: meta.route, driver: meta.driver, seq: '', stop: 'TOTAL', address: '', contact: '', segment: '', order: '', accepted_by: totals.handoffs_named ? `${totals.handoffs_named} named` : '', next_action: '', status: `${totals.delivered} delivered / ${totals.stops}`, completed_at: '', not_in: totals.not_in, not_in_outcome: '', interested: totals.interested, interest: '', event_date: '', headcount: totals.interested_headcount || '', couldnt_drop: totals.couldnt_drop, notes: '' });
       deliverFile(`${slug(meta.route)}-${viewDate}-stops.csv`, toCSV(data, cols), 'text/csv');
     }
   }
@@ -736,9 +761,9 @@
     const id = b.dataset.id;
     switch (b.dataset.act) {
       case 'deliver': return deliver(id);
-      case 'returns': return sheetReturns(id);
+      case 'interest': return sheetInterest(id);
       case 'absent': return sheetAbsent(id);
-      case 'spill': return sheetSpill(id);
+      case 'blocked': return sheetBlocked(id);
       case 'handoff': return sheetHandoff(id);
       case 'roster-link': { const v = $('#rosterLink').value.trim(); if (!importRoster(v)) toast('That link has no roster in it'); return; }
       case 'exception': return sheetLog(id);
