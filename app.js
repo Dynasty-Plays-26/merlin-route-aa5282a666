@@ -3,7 +3,7 @@
   'use strict';
 
   const KEY = 'milkroute.v1';
-  const APP_VERSION = '1.3.0';
+  const APP_VERSION = '1.4.0';
 
   // ---------- Storage ----------
   const blank = () => ({
@@ -133,7 +133,7 @@
           ${tagHtml}
         </div>
       </div>
-      ${s.brief ? `<details class="brief"><summary>411</summary><p>${esc(s.brief)}</p></details>` : ''}
+      ${brief411(s)}
       <button class="btn-deliver" data-act="deliver" data-id="${s.id}">${ic.check}Delivered</button>
       <div class="actions">
         <button class="act blue" data-act="interest" data-id="${s.id}">Interested</button>
@@ -327,6 +327,27 @@
     const v = $('#view');
     v.innerHTML = tab === 'route' ? renderRoute() : tab === 'summary' ? renderSummary() : tab === 'stops' ? renderStops() : renderSettings();
   }
+  const ROLE_ORDER = ['Owner/CEO', 'Owner', 'CFO', 'HR', 'Local lead', 'Gatekeeper'];
+  function brief411(s) {
+    const t = Array.isArray(s.targets) ? s.targets : [];
+    if (!s.brief && !t.length && !s.phone) return '';
+    const lines = (s.brief || '').split('\n').map(x => x.trim()).filter(Boolean);
+    const groups = ROLE_ORDER.map(r => [r, t.filter(p => p.role === r)]).filter(([, l]) => l.length);
+    t.filter(p => !ROLE_ORDER.includes(p.role)).forEach(p => groups.push([p.role || 'Other', [p]]));
+    const telHref = p => 'tel:' + p.replace(/[^0-9+]/g, '');
+    return `<details class="brief"><summary>411${t.length ? ` <span class="brief-count">${t.length} targets</span>` : ''}</summary>
+      <div class="brief-body">
+        ${s.phone ? `<a class="brief-phone" href="${telHref(s.phone)}">Office ${esc(s.phone)}</a>` : ''}
+        ${lines.length ? `<ul class="brief-facts">${lines.map(l => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
+        ${groups.map(([r, l]) => `<div class="tgt-group"><div class="tgt-role">${esc(r)}</div>${l.map(p => `<div class="tgt">
+          <div class="tgt-name">${esc(p.name)}${p.since ? ` <span class="tgt-since">since ${esc(p.since)}</span>` : ''}</div>
+          <div class="tgt-title">${esc(p.title || '')}</div>
+          ${p.email ? `<a class="tgt-email" href="mailto:${esc(p.email)}">${esc(p.email)}</a>` : ''}
+          ${p.note ? `<div class="tgt-note">${esc(p.note)}</div>` : ''}
+        </div>`).join('')}</div>`).join('')}
+      </div></details>`;
+  }
+
   function go(t) {
     tab = t;
     try { history.replaceState(null, '', '#' + t); } catch (e) {}
@@ -531,7 +552,7 @@
   function importRoster(str) {
     const d = decodeRoster(str);
     if (!d) return false;
-    db.stops = d.stops.map(x => ({ id: x.id || uid(), name: x.name || 'Stop', address: x.address || '', contact: x.contact || '', segment: x.segment || '', order: x.order || '', notes: x.notes || '', brief: x.brief || '' }));
+    db.stops = d.stops.map(x => ({ id: x.id || uid(), name: x.name || 'Stop', address: x.address || '', contact: x.contact || '', segment: x.segment || '', order: x.order || '', notes: x.notes || '', brief: x.brief || '', targets: Array.isArray(x.targets) ? x.targets : [], phone: x.phone || '' }));
     if (d.routeName) db.settings.routeName = d.routeName;
     if (d.driver && !db.settings.driver) db.settings.driver = d.driver;
     if (db.days[localDate()]) snapshotIfNeeded();
@@ -817,6 +838,13 @@
     db.settings.routeName = d.routeName;
     if (!db.settings.driver) db.settings.driver = d.driver || '';
     if (db.days[localDate()]) snapshotIfNeeded();
+    db.rosterVersion = d.version || 1;
+    save();
+  } else if (window.MERLIN_DEFAULT_ROSTER && (window.MERLIN_DEFAULT_ROSTER.version || 1) > (db.rosterVersion || 1)) {
+    // Refresh 411 intel on existing stops without touching today's progress
+    const d = window.MERLIN_DEFAULT_ROSTER;
+    d.stops.forEach(x => { const s = db.stops.find(y => y.id === x.id); if (s) { s.brief = x.brief; s.targets = x.targets || []; if (x.phone) s.phone = x.phone; if (x.address) s.address = x.address; } });
+    db.rosterVersion = d.version;
     save();
   }
   if (/[#&]load=/.test(location.hash)) {
