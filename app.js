@@ -1,13 +1,13 @@
-/* Milk Route — offline-first PWA. All data lives on this device (localStorage). */
+/* Merlin Route — offline-first PWA. All data lives on this device (localStorage). */
 (() => {
   'use strict';
 
   const KEY = 'milkroute.v1';
-  const APP_VERSION = '1.0.0';
+  const APP_VERSION = '1.1.0';
 
   // ---------- Storage ----------
   const blank = () => ({
-    settings: { routeName: 'Milk Route', driver: '', webhookUrl: '', webhookToken: '', autoPush: false, deviceId: uid() },
+    settings: { routeName: 'Route', driver: '', webhookUrl: '', webhookToken: '', autoPush: false, deviceId: uid() },
     stops: [],
     days: {},
     outbox: []
@@ -50,7 +50,7 @@
   }
   function rec(stopId, ds = localDate()) {
     const d = day(ds);
-    if (!d.stops[stopId]) d.stops[stopId] = { status: 'pending', at: null, returns: 0, absent: null, spills: [], notes: [] };
+    if (!d.stops[stopId]) d.stops[stopId] = { status: 'pending', at: null, returns: 0, absent: null, spills: [], notes: [], handoff: null };
     return d.stops[stopId];
   }
   // Stops for a given day: today uses the live list; past days use the snapshot saved when work started.
@@ -63,7 +63,7 @@
     const d = day(ds);
     d.snapshot = db.stops.map(s => ({ ...s }));
   }
-  const hasException = r => !!(r && (r.absent || r.spills.length || r.notes.length));
+  const hasException = r => !!(r && (r.absent || (r.spills || []).length || (r.notes || []).length));
   const isDone = r => r && (r.status === 'delivered' || r.status === 'skipped');
 
   // ---------- Icons ----------
@@ -78,7 +78,7 @@
 
   // ---------- Header ----------
   function renderHeader() {
-    $('#routeName').textContent = db.settings.routeName || 'Milk Route';
+    $('#routeName').textContent = db.settings.routeName || 'Route';
     $('#routeDate').textContent = prettyDate(viewDate) + (db.settings.driver ? ' · ' + db.settings.driver : '');
     const list = stopsFor(viewDate);
     const d = db.days[viewDate];
@@ -100,6 +100,7 @@
     if (r.returns) tags.push(`<span class="tag blue">${r.returns} bottle${r.returns === 1 ? '' : 's'} back</span>`);
     if (r.absent) tags.push(`<span class="tag amber">Absent · ${r.absent.outcome === 'left' ? 'left at door' : 'brought back'}</span>`);
     r.spills.forEach(sp => tags.push(`<span class="tag red">Spill · ${sp.crates} crate${sp.crates === 1 ? '' : 's'}${sp.bottles ? `, ${sp.bottles} btl lost` : ''}</span>`));
+    if (r.handoff) tags.push(`<span class="tag green">Took it: ${esc(r.handoff.acceptedBy || '—')}${r.handoff.next ? ' · ' + esc(r.handoff.next) : ''}</span>`);
     if (r.notes.length) tags.push(`<span class="tag amber">${r.notes.length} note${r.notes.length === 1 ? '' : 's'}</span>`);
     const tagHtml = tags.length ? `<div class="tags">${tags.join('')}</div>` : '';
 
@@ -124,16 +125,20 @@
         <div>
           <div class="card-title">${esc(s.name)}</div>
           ${s.address ? `<div class="card-addr">${esc(s.address)}</div>` : ''}
+          ${s.contact ? `<div class="card-contact">${esc(s.contact)}</div>` : ''}
           ${s.order ? `<div class="card-order">${esc(s.order)}</div>` : ''}
+          ${s.segment ? ` <span class="tag ${/over/i.test(s.segment) ? 'blue' : 'amber'}">${esc(s.segment)}</span>` : ''}
           ${s.notes ? `<div class="card-note">${esc(s.notes)}</div>` : ''}
           ${tagHtml}
         </div>
       </div>
+      ${s.brief ? `<details class="brief"><summary>411</summary><p>${esc(s.brief)}</p></details>` : ''}
       <button class="btn-deliver" data-act="deliver" data-id="${s.id}">${ic.check}Delivered</button>
       <div class="actions">
         <button class="act blue" data-act="returns" data-id="${s.id}">Bottles back</button>
         <button class="act amber" data-act="absent" data-id="${s.id}">Not home</button>
         <button class="act red" data-act="spill" data-id="${s.id}">Spilled crate</button>
+        <button class="act teal" data-act="handoff" data-id="${s.id}">Who took it</button>
       </div>
     </article>`;
   }
@@ -142,7 +147,7 @@
     const today = localDate();
     const list = db.stops;
     if (!list.length) {
-      return `<div class="empty"><h3>No stops on this route yet</h3><p>Add your stops once. They carry over every day.</p>
+      return `<div class="empty"><h3>No stops on this route yet</h3><p>Open your roster link, or add stops once. They carry over every day.</p>
         <div class="row" style="justify-content:center;margin-top:18px">
           <button class="btn" data-go="stops">Add stops</button>
           <button class="btn secondary" data-act="sample">Load sample route</button>
@@ -169,26 +174,28 @@
     const list = stopsFor(ds);
     const d = db.days[ds] || { stops: {} };
     const rows = list.map((s, i) => {
-      const r = d.stops[s.id] || { status: 'pending', at: null, returns: 0, absent: null, spills: [], notes: [] };
+      const r = { status: 'pending', at: null, returns: 0, absent: null, spills: [], notes: [], handoff: null, ...(d.stops[s.id] || {}) };
       const crates = r.spills.reduce((a, b) => a + (b.crates || 0), 0);
       const lost = r.spills.reduce((a, b) => a + (b.bottles || 0), 0);
       let status = r.status;
       if (r.status === 'skipped') status = 'not_delivered';
       return {
-        seq: i + 1, stop_id: s.id, stop: s.name, address: s.address || '', order: s.order || '',
+        seq: i + 1, stop_id: s.id, stop: s.name, address: s.address || '', contact: s.contact || '', segment: s.segment || '', order: s.order || '',
+        accepted_by: r.handoff ? r.handoff.acceptedBy || '' : '', next_action: r.handoff ? r.handoff.next || '' : '',
         status, completed_at: r.at || '', bottles_returned: r.returns || 0,
         customer_absent: r.absent ? 'yes' : 'no', absent_outcome: r.absent ? (r.absent.outcome === 'left' ? 'left_at_door' : 'brought_back') : '',
         spilled_crates: crates, bottles_lost: lost,
-        notes: [...(r.spills.map(x => x.note).filter(Boolean)), ...(r.absent && r.absent.note ? [r.absent.note] : []), ...r.notes.map(n => n.text)].join(' | ')
+        notes: [...(r.handoff && r.handoff.note ? [r.handoff.note] : []), ...(r.spills.map(x => x.note).filter(Boolean)), ...(r.absent && r.absent.note ? [r.absent.note] : []), ...r.notes.map(n => n.text)].join(' | ')
       };
     });
     const events = [];
     list.forEach(s => {
       const r = d.stops[s.id]; if (!r) return;
       if (r.absent) events.push({ at: r.absent.at, stop: s.name, type: 'customer_absent', qty: '', detail: (r.absent.outcome === 'left' ? 'Left at door' : 'Brought back') + (r.absent.note ? ' — ' + r.absent.note : '') });
-      r.spills.forEach(sp => events.push({ at: sp.at, stop: s.name, type: 'spilled_crate', qty: sp.crates, detail: `${sp.bottles || 0} bottles lost${sp.note ? ' — ' + sp.note : ''}` }));
+      (r.spills || []).forEach(sp => events.push({ at: sp.at, stop: s.name, type: 'spilled_crate', qty: sp.crates, detail: `${sp.bottles || 0} bottles lost${sp.note ? ' — ' + sp.note : ''}` }));
       if (r.returns) events.push({ at: r.returnsAt || r.at || '', stop: s.name, type: 'bottle_return', qty: r.returns, detail: '' });
-      r.notes.forEach(n => events.push({ at: n.at, stop: s.name, type: 'note', qty: '', detail: n.text }));
+      (r.notes || []).forEach(n => events.push({ at: n.at, stop: s.name, type: 'note', qty: '', detail: n.text }));
+      if (r.handoff) events.push({ at: r.handoff.at, stop: s.name, type: 'handoff', qty: '', detail: [r.handoff.acceptedBy && 'Took it: ' + r.handoff.acceptedBy, r.handoff.next && 'Next: ' + r.handoff.next, r.handoff.note].filter(Boolean).join(' — ') });
     });
     events.sort((a, b) => String(a.at).localeCompare(String(b.at)));
     const totals = {
@@ -197,6 +204,7 @@
       not_delivered: rows.filter(r => r.status === 'not_delivered').length,
       pending: rows.filter(r => r.status === 'pending').length,
       customer_absent: rows.filter(r => r.customer_absent === 'yes').length,
+      handoffs_named: rows.filter(r => r.accepted_by).length,
       bottles_returned: rows.reduce((a, r) => a + r.bottles_returned, 0),
       spilled_crates: rows.reduce((a, r) => a + r.spilled_crates, 0),
       bottles_lost: rows.reduce((a, r) => a + r.bottles_lost, 0)
@@ -240,7 +248,7 @@
         ${rows.length ? `<div class="table-wrap"><table>
           <thead><tr><th>#</th><th>Stop</th><th>Status</th><th>Time</th><th class="num">Back</th><th class="num">Spill</th><th>Notes</th></tr></thead>
           <tbody>${rows.map(r => `<tr>
-            <td>${r.seq}</td><td><strong>${esc(r.stop)}</strong><div class="muted">${esc(r.order)}</div></td>
+            <td>${r.seq}</td><td><strong>${esc(r.stop)}</strong><div class="muted">${esc([r.address, r.accepted_by && 'Took it: ' + r.accepted_by].filter(Boolean).join(' · '))}</div></td>
             <td class="st ${r.customer_absent === 'yes' ? 'absent' : r.status === 'not_delivered' ? 'skipped' : r.status}">${r.status === 'not_delivered' ? 'Not delivered' : r.status === 'delivered' ? (r.customer_absent === 'yes' ? 'Left at door' : 'Delivered') : 'Pending'}</td>
             <td>${timeStr(r.completed_at)}</td><td class="num">${r.bottles_returned || ''}</td><td class="num">${r.spilled_crates || ''}</td><td>${esc(r.notes)}</td>
           </tr>`).join('')}</tbody></table></div>` : '<p class="muted">No stops for this day.</p>'}
@@ -263,8 +271,14 @@
           <button class="icon-btn" data-act="edit-stop" data-id="${s.id}" aria-label="Edit">${ic.edit}</button>
         </li>`).join('')}</ul>` : '<div class="empty"><h3>No stops yet</h3><p>Add stops one at a time or paste a list below.</p></div>'}
       <div class="panel" style="margin-top:16px">
+        <h3>Load a roster link</h3>
+        <p class="hint">Paste the private roster link Merlin sent you. It replaces the stop list; past days stay.</p>
+        <input type="url" id="rosterLink" placeholder="https://…#load=…" autocapitalize="off" autocorrect="off">
+        <div class="row" style="margin-top:12px"><button class="btn" data-act="roster-link">Load roster</button></div>
+      </div>
+      <div class="panel">
         <h3>Paste a stop list</h3>
-        <p class="hint">One stop per line: <code>Name, Address, Standing order, Note</code>. Adds to the end of the route.</p>
+        <p class="hint">One stop per line: <code>Name, Address, Drop, Note, Contact, Segment</code>. Adds to the end of the route.</p>
         <textarea id="bulk" placeholder="Garcia Family, 1408 Elm St, 4 qt whole + 1 cream, Side porch cooler"></textarea>
         <div class="row" style="margin-top:12px">
           <button class="btn" data-act="bulk">Add these stops</button>
@@ -301,7 +315,7 @@
         </div>
         <input type="file" id="restoreFile" accept="application/json,.json" hidden>
       </div>
-      <p class="muted" style="text-align:center">Milk Route v${APP_VERSION} · Add to Home Screen from the Share menu for full-screen offline use.</p>`;
+      <p class="muted" style="text-align:center">Merlin Route v${APP_VERSION} · Add to Home Screen from the Share menu for full-screen offline use.</p>`;
   }
 
   // ---------- Render ----------
@@ -459,6 +473,49 @@
     });
   }
 
+  function sheetHandoff(id) {
+    const s = stopById(id); const r = rec(id); const h = r.handoff || {};
+    const nexts = ['Send menu', 'Follow up next week', 'Return later', 'Wants a tasting', 'No next step'];
+    let next = h.next || '';
+    openSheet(`<h2>Who took it</h2><p class="sub">${esc(s.name)}${s.contact ? ' · ' + esc(s.contact) : ''}</p>
+      <label class="field"><span>Name of the person who took it</span><input type="text" id="hBy" value="${esc(h.acceptedBy || '')}" placeholder="First name is fine" autofocus></label>
+      <p class="stepper-label">Next step</p>
+      <div class="choice" role="group">${nexts.map(n => `<button type="button" data-n="${esc(n)}" aria-pressed="${n === next}">${esc(n)}</button>`).join('')}</div>
+      <label class="field"><span>Note (optional)</span><input type="text" id="hNote" value="${esc(h.note || '')}" placeholder="Email, best day, what they said…"></label>
+      <div class="row"><button class="btn" id="okDeliver">Save + Delivered</button><button class="btn secondary" id="ok">Save only</button></div>
+      <button class="btn secondary wide" id="cancel" style="margin-top:10px">Cancel</button>`, sh => {
+      sh.querySelectorAll('[data-n]').forEach(b => b.onclick = () => { next = next === b.dataset.n ? '' : b.dataset.n; sh.querySelectorAll('[data-n]').forEach(x => x.setAttribute('aria-pressed', x.dataset.n === next)); });
+      const apply = () => { touchDay(); rec(id).handoff = { acceptedBy: sh.querySelector('#hBy').value.trim(), next, note: sh.querySelector('#hNote').value.trim(), at: new Date().toISOString() }; save(); };
+      sh.querySelector('#ok').onclick = () => { apply(); closeSheet(); render(); toast('Handoff saved'); };
+      sh.querySelector('#okDeliver').onclick = () => { apply(); closeSheet(); if (isDone(rec(id))) { render(); toast('Handoff saved'); } else deliver(id); };
+      sh.querySelector('#cancel').onclick = closeSheet;
+    });
+  }
+
+  // Private roster links carry the stop list in the URL fragment, which never reaches the server.
+  function decodeRoster(str) {
+    const m = String(str || '').match(/[#&]load=([A-Za-z0-9_-]+)/);
+    if (!m) return null;
+    try {
+      const b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
+      const bin = atob(b64 + '==='.slice((b64.length + 3) % 4));
+      const json = new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
+      const d = JSON.parse(json);
+      return d && Array.isArray(d.stops) ? d : null;
+    } catch (e) { console.warn(e); return null; }
+  }
+  function importRoster(str) {
+    const d = decodeRoster(str);
+    if (!d) return false;
+    db.stops = d.stops.map(x => ({ id: x.id || uid(), name: x.name || 'Stop', address: x.address || '', contact: x.contact || '', segment: x.segment || '', order: x.order || '', notes: x.notes || '', brief: x.brief || '' }));
+    if (d.routeName) db.settings.routeName = d.routeName;
+    if (d.driver && !db.settings.driver) db.settings.driver = d.driver;
+    if (db.days[localDate()]) snapshotIfNeeded();
+    save();
+    toast(`${db.stops.length} stops loaded${d.routeName ? ' · ' + d.routeName : ''}`);
+    return true;
+  }
+
   function undo(id) {
     const r = rec(id);
     const prev = JSON.stringify(r);
@@ -470,17 +527,20 @@
 
   // ---------- Stop editing ----------
   function sheetStop(id) {
-    const s = id ? stopById(id) : { name: '', address: '', order: '', notes: '' };
+    const s = id ? stopById(id) : { name: '', address: '', contact: '', segment: '', order: '', notes: '', brief: '' };
     openSheet(`<h2>${id ? 'Edit stop' : 'New stop'}</h2><p class="sub">${id ? 'Changes apply from today forward.' : 'Added to the end of the route.'}</p>
       <label class="field"><span>Customer / stop name</span><input type="text" id="sN" value="${esc(s.name)}" autofocus></label>
-      <label class="field"><span>Address</span><input type="text" id="sA" value="${esc(s.address)}"></label>
+      <label class="field"><span>Address / suite</span><input type="text" id="sA" value="${esc(s.address)}"></label>
+      <label class="field"><span>Contact · title</span><input type="text" id="sC" value="${esc(s.contact || '')}"></label>
+      <label class="field"><span>Segment</span><input type="text" id="sS" value="${esc(s.segment || '')}" placeholder="Over 50 · Under 50 · Unknown"></label>
       <label class="field"><span>Standing order</span><input type="text" id="sO" value="${esc(s.order)}" placeholder="4 qt whole, 1 pt cream"></label>
       <label class="field"><span>Driver note</span><input type="text" id="sX" value="${esc(s.notes)}" placeholder="Side porch cooler"></label>
+      <label class="field"><span>411 (back-pocket notes)</span><textarea id="sB" style="font-family:inherit;min-height:90px">${esc(s.brief || '')}</textarea></label>
       <button class="btn wide" id="ok">${id ? 'Save stop' : 'Add stop'}</button>
       ${id ? '<button class="btn danger wide" id="del" style="margin-top:10px">Remove from route</button>' : ''}
       <button class="btn secondary wide" id="cancel" style="margin-top:10px">Cancel</button>`, sh => {
       sh.querySelector('#ok').onclick = () => {
-        const v = { name: sh.querySelector('#sN').value.trim(), address: sh.querySelector('#sA').value.trim(), order: sh.querySelector('#sO').value.trim(), notes: sh.querySelector('#sX').value.trim() };
+        const v = { name: sh.querySelector('#sN').value.trim(), address: sh.querySelector('#sA').value.trim(), order: sh.querySelector('#sO').value.trim(), notes: sh.querySelector('#sX').value.trim(), contact: sh.querySelector('#sC').value.trim(), segment: sh.querySelector('#sS').value.trim(), brief: sh.querySelector('#sB').value.trim() };
         if (!v.name) { toast('Name is required'); return; }
         if (id) Object.assign(stopById(id), v); else db.stops.push({ id: uid(), ...v });
         if (db.days[localDate()]) snapshotIfNeeded();
@@ -514,9 +574,9 @@
     const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     let n = 0;
     lines.forEach(l => {
-      const [name, address = '', order = '', notes = ''] = parseCSVLine(l);
+      const [name, address = '', order = '', notes = '', contact = '', segment = ''] = parseCSVLine(l);
       if (!name || /^name$/i.test(name)) return;
-      db.stops.push({ id: uid(), name, address, order, notes }); n++;
+      db.stops.push({ id: uid(), name, address, order, notes, contact, segment }); n++;
     });
     if (db.days[localDate()]) snapshotIfNeeded();
     save(); render(); toast(`${n} stop${n === 1 ? '' : 's'} added`);
@@ -536,7 +596,7 @@
       ['St. Mark Rectory', '88 Chapel St', '4 qt whole', '']
     ];
     sample.forEach(([name, address, order, notes]) => db.stops.push({ id: uid(), name, address, order, notes }));
-    if (db.settings.routeName === 'Milk Route') db.settings.routeName = 'Sample Route 1';
+    if (!db.settings.routeName || db.settings.routeName === 'Route') db.settings.routeName = 'Sample Route';
     save(); go('route'); toast('Sample route loaded — edit it in Stops');
   }
 
@@ -570,9 +630,9 @@
       const data = events.map(e => ({ ...meta, time: e.at ? new Date(e.at).toLocaleTimeString() : '', stop: e.stop, type: e.type, qty: e.qty, detail: e.detail }));
       deliverFile(`${slug(meta.route)}-${viewDate}-exceptions.csv`, toCSV(data, cols), 'text/csv');
     } else {
-      const cols = ['date', 'route', 'driver', 'seq', 'stop', 'address', 'order', 'status', 'completed_at', 'bottles_returned', 'customer_absent', 'absent_outcome', 'spilled_crates', 'bottles_lost', 'notes'];
+      const cols = ['date', 'route', 'driver', 'seq', 'stop', 'address', 'contact', 'segment', 'order', 'status', 'completed_at', 'accepted_by', 'next_action', 'bottles_returned', 'customer_absent', 'absent_outcome', 'spilled_crates', 'bottles_lost', 'notes'];
       const data = rows.map(r => ({ ...meta, ...r, completed_at: r.completed_at ? new Date(r.completed_at).toLocaleString() : '' }));
-      data.push({ date: viewDate, route: meta.route, driver: meta.driver, seq: '', stop: 'TOTAL', address: '', order: '', status: `${totals.delivered} delivered / ${totals.stops}`, completed_at: '', bottles_returned: totals.bottles_returned, customer_absent: totals.customer_absent, absent_outcome: '', spilled_crates: totals.spilled_crates, bottles_lost: totals.bottles_lost, notes: '' });
+      data.push({ date: viewDate, route: meta.route, driver: meta.driver, seq: '', stop: 'TOTAL', address: '', contact: '', segment: '', order: '', accepted_by: totals.handoffs_named ? `${totals.handoffs_named} named` : '', next_action: '', status: `${totals.delivered} delivered / ${totals.stops}`, completed_at: '', bottles_returned: totals.bottles_returned, customer_absent: totals.customer_absent, absent_outcome: '', spilled_crates: totals.spilled_crates, bottles_lost: totals.bottles_lost, notes: '' });
       deliverFile(`${slug(meta.route)}-${viewDate}-stops.csv`, toCSV(data, cols), 'text/csv');
     }
   }
@@ -581,7 +641,7 @@
   function buildPayload(ds, test = false) {
     const { rows, events, totals } = computeDay(ds);
     return {
-      type: test ? 'milk_route.test' : 'milk_route.daily_summary',
+      type: test ? 'merlin_route.test' : 'merlin_route.daily_summary',
       app_version: APP_VERSION,
       device_id: db.settings.deviceId,
       generated_at: new Date().toISOString(),
@@ -659,7 +719,7 @@
         if (!d || !Array.isArray(d.stops) || typeof d.days !== 'object') throw new Error('bad');
         db = { ...blank(), ...d, settings: { ...blank().settings, ...d.settings } };
         save(); render(); toast('Backup restored');
-      } catch (e) { toast('That file is not a Milk Route backup'); }
+      } catch (e) { toast('That file is not a Merlin Route backup'); }
     };
     fr.readAsText(file);
   }
@@ -679,6 +739,8 @@
       case 'returns': return sheetReturns(id);
       case 'absent': return sheetAbsent(id);
       case 'spill': return sheetSpill(id);
+      case 'handoff': return sheetHandoff(id);
+      case 'roster-link': { const v = $('#rosterLink').value.trim(); if (!importRoster(v)) toast('That link has no roster in it'); return; }
       case 'exception': return sheetLog(id);
       case 'undo': return undo(id);
       case 'sample': return loadSample();
@@ -697,13 +759,13 @@
       case 'push': return queuePush(viewDate);
       case 'save-settings': {
         Object.assign(db.settings, {
-          routeName: $('#setRoute').value.trim() || 'Milk Route', driver: $('#setDriver').value.trim(),
+          routeName: $('#setRoute').value.trim() || 'Route', driver: $('#setDriver').value.trim(),
           webhookUrl: $('#setHook').value.trim(), webhookToken: $('#setToken').value.trim(), autoPush: $('#setAuto').checked
         });
         save(); render(); return toast('Settings saved');
       }
       case 'test-hook': return queuePush(localDate(), true);
-      case 'backup': return deliverFile(`milk-route-backup-${localDate()}.json`, JSON.stringify(db, null, 2), 'application/json');
+      case 'backup': return deliverFile(`merlin-route-backup-${localDate()}.json`, JSON.stringify(db, null, 2), 'application/json');
       case 'restore': { const inp = $('#restoreFile'); inp.onchange = () => inp.files[0] && restoreFrom(inp.files[0]); return inp.click(); }
       case 'reset-today': {
         if (!armedReset) { armedReset = true; b.textContent = 'Tap again to clear today'; setTimeout(() => { armedReset = false; }, 4000); return; }
@@ -722,6 +784,11 @@
     navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW', err));
   }
 
+  if (/[#&]load=/.test(location.hash)) {
+    importRoster(location.hash);
+    tab = 'route';
+    try { history.replaceState(null, '', location.pathname + '#route'); } catch (e) {}
+  }
   render();
   flushOutbox();
 })();
